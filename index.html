@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D 쌓기나무 스튜디오</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      overflow: hidden;
+    }
+    #canvas-wrap { position: fixed; inset: 0; }
+    .hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: space-between;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .panel {
+      pointer-events: auto;
+      background: rgba(15, 23, 42, 0.82);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    button {
+      background: #1e293b;
+      color: #f8fafc;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #334155; }
+    button.active {
+      background: #2563eb;
+      border-color: #60a5fa;
+      font-weight: 600;
+    }
+    .hint {
+      position: fixed;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #cbd5e1;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-wrap"></div>
+  <div class="hud">
+    <div class="panel">
+      <button id="mode-add" class="active">쌓기 모드</button>
+      <button id="mode-remove">지우기 모드</button>
+      <button id="xray-btn">투시하기: OFF</button>
+      <button id="clear-btn">전체 지우기</button>
+    </div>
+    <div class="panel">
+      <span id="count-label">총 0개</span>
+      <button id="preset-btn">예시 모양</button>
+    </div>
+  </div>
+  <div class="hint">좌클릭: 쌓기/삭제 · 우클릭 또는 빈 곳 드래그: 360도 회전 · 휠: 확대/축소</div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const wrap = document.getElementById("canvas-wrap");
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#0f172a");
+
+    const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+    camera.position.set(6, 6, 6);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    wrap.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+    dirLight.position.set(8, 14, 10);
+    scene.add(dirLight);
+
+    const GRID_SIZE = 5;
+    const gridHelper = new THREE.GridHelper(GRID_SIZE, GRID_SIZE, 0x64748b, 0x334155);
+    gridHelper.position.y = -0.5;
+    scene.add(gridHelper);
+
+    const basePlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    basePlane.rotation.x = -Math.PI / 2;
+    basePlane.position.y = -0.5;
+    scene.add(basePlane);
+
+    const blocks = new Map();
+    const blockGroup = new THREE.Group();
+    scene.add(blockGroup);
+
+    let mode = "add";
+    let xray = false;
+
+    const palette = [0x38bdf8, 0x60a5fa, 0x818cf8, 0xa78bfa, 0xf472b6, 0xfb923c];
+
+    function keyOf(x, y, z) { return `${x},${y},${z}`; }
+
+    function refreshMaterials() {
+      blockGroup.children.forEach((mesh) => {
+        const y = mesh.userData.pos.y;
+        mesh.material.color.setHex(palette[y % palette.length]);
+        mesh.material.transparent = xray;
+        mesh.material.opacity = xray ? 0.28 : 1.0;
+        mesh.material.depthWrite = !xray;
+        mesh.material.needsUpdate = true;
+      });
+      document.getElementById("count-label").textContent = `총 ${blocks.size}개`;
+    }
+
+    function addBlock(x, y, z) {
+      const half = Math.floor(GRID_SIZE / 2);
+      if (x < -half || x > half || z < -half || z > half || y < 0 || y > 7) return;
+      const k = keyOf(x, y, z);
+      if (blocks.has(k)) return;
+
+      const geo = new THREE.BoxGeometry(0.96, 0.96, 0.96);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.35 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x, y, z);
+      mesh.userData.pos = { x, y, z };
+
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: 0x0f172a })
+      );
+      mesh.add(edges);
+
+      blockGroup.add(mesh);
+      blocks.set(k, mesh);
+      refreshMaterials();
+    }
+
+    function removeBlock(mesh) {
+      const { x, y, z } = mesh.userData.pos;
+      blockGroup.remove(mesh);
+      blocks.delete(keyOf(x, y, z));
+      refreshMaterials();
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let downPos = { x: 0, y: 0 };
+
+    renderer.domElement.addEventListener("pointerdown", (e) => {
+      downPos = { x: e.clientX, y: e.clientY };
+    });
+
+    renderer.domElement.addEventListener("pointerup", (e) => {
+      if (e.button !== 0) return;
+      const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
+      if (moved > 5) return;
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+
+      const hits = raycaster.intersectObjects(blockGroup.children, false);
+      if (hits.length > 0) {
+        const hit = hits[0];
+        const { x, y, z } = hit.object.userData.pos;
+        if (mode === "remove") {
+          removeBlock(hit.object);
+        } else {
+          const n = hit.face.normal;
+          addBlock(x + Math.round(n.x), y + Math.round(n.y), z + Math.round(n.z));
+        }
+        return;
+      }
+
+      if (mode === "add") {
+        const planeHits = raycaster.intersectObject(basePlane);
+        if (planeHits.length > 0) {
+          const p = planeHits[0].point;
+          addBlock(Math.round(p.x), 0, Math.round(p.z));
+        }
+      }
+    });
+
+    document.getElementById("mode-add").onclick = () => {
+      mode = "add";
+      document.getElementById("mode-add").classList.add("active");
+      document.getElementById("mode-remove").classList.remove("active");
+    };
+    document.getElementById("mode-remove").onclick = () => {
+      mode = "remove";
+      document.getElementById("mode-remove").classList.add("active");
+      document.getElementById("mode-add").classList.remove("active");
+    };
+    document.getElementById("xray-btn").onclick = (e) => {
+      xray = !xray;
+      e.target.textContent = `투시하기: ${xray ? "ON" : "OFF"}`;
+      e.target.classList.toggle("active", xray);
+      refreshMaterials();
+    };
+    document.getElementById("clear-btn").onclick = () => {
+      [...blocks.values()].forEach(removeBlock);
+    };
+    document.getElementById("preset-btn").onclick = () => {
+      [...blocks.values()].forEach(removeBlock);
+      [[0,0,0],[1,0,0],[0,0,1],[0,1,0],[1,1,0],[-1,0,0]].forEach(([x,y,z]) => addBlock(x,y,z));
+    };
+
+    addBlock(0, 0, 0);
+    addBlock(1, 0, 0);
+    addBlock(0, 1, 0);
+
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    (function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    })();
+  </script>
+</body>
+</html>
